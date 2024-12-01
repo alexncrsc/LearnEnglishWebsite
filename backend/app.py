@@ -10,16 +10,22 @@ from sqlalchemy import and_
 
 
 
+
+
+
 app = Flask(__name__)
 CORS(app)
 
 
 # Configurarea conexiunii la PostgreSQL
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:1234@localhost/duolingo_db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://alexnicorescu:parola@localhost/baza_de_date'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+from flask_migrate import Migrate
 
+# Assuming `app` and `db` are already defined
+migrate = Migrate(app, db)
 
 
 
@@ -33,7 +39,8 @@ class User(db.Model):
     role = db.Column(db.String(20), nullable=False, default="User")  # Default: User
     is_banned = db.Column(db.Boolean, default=False)  # Indică dacă utilizatorul este banat
     ban_reason = db.Column(db.String(255), nullable=True)  # Motivul banării
-
+    xp = db.Column(db.Integer, default=0)
+                   
     def to_dict(self):
         return {
             "id": self.id,
@@ -42,6 +49,7 @@ class User(db.Model):
             "role": self.role,
             "is_banned": self.is_banned,
             "ban_reason": self.ban_reason,
+            "xp": self.xp,
         }
 
 
@@ -233,6 +241,8 @@ def kick_user():
     return {"message": f"User {user.username} has been removed.", "status": "success"}, 200
 
 
+from sqlalchemy.sql.expression import func
+
 class Exercise(db.Model):
     __tablename__ = 'exercises'
     id = db.Column(db.Integer, primary_key=True)
@@ -242,6 +252,7 @@ class Exercise(db.Model):
     correct_answer = db.Column(db.String(200), nullable=True)
     type = db.Column(db.String(50), nullable=False)  # 'multiple_choice', 'fill_blank', 'rearrange'
     difficulty = db.Column(db.String(50), nullable=False, default="easy")
+    random_order = db.Column(db.Float, default=func.random())  # New column
 
     def to_dict(self):
         return {
@@ -253,6 +264,7 @@ class Exercise(db.Model):
             "type": self.type,
             "difficulty": self.difficulty
         }
+
 
 class ReviewerRequest(db.Model):
     __tablename__ = 'reviewer_requests'
@@ -417,20 +429,20 @@ def get_questions():
     session_questions = data.get('session_questions', [])
 
     if not user_id:
-        return {"message": "User ID necesar", "status": "fail"}, 400
+        return {"message": "User ID is required.", "status": "fail"}, 400
 
-    difficulty_levels = {'easy': 1, 'medium': 2, 'hard': 3}
-    max_difficulty = difficulty_levels.get(difficulty, 1)
-
+    # Fetch questions based on difficulty and randomize by `random_order`
     questions = Exercise.query.filter(
-        Exercise.difficulty.in_(['easy', 'medium', 'hard'][:max_difficulty]),
+        Exercise.difficulty == difficulty,
         ~Exercise.id.in_(session_questions)
-    ).limit(5).all()
+    ).order_by(Exercise.random_order).limit(5).all()  # Sort by random_order
 
     if not questions:
-        return {"message": "Nu mai există întrebări disponibile pentru această dificultate.", "status": "fail"}, 404
+        return {"message": f"No more questions available for difficulty {difficulty}.", "status": "fail"}, 404
 
     return {"questions": [q.to_dict() for q in questions], "status": "success"}, 200
+
+
 
 
 
@@ -470,17 +482,26 @@ def submit_answer():
             correct = False
         if correct:
             xp = 10 if question.difficulty == 'easy' else 20 if question.difficulty == 'medium' else 30
+
     elif question.type == 'rearrange':
         correct = question.correct_answer and question.correct_answer.lower().strip() == answer.lower().strip()
         if correct:
             xp = 20 if question.difficulty == 'easy' else 30 if question.difficulty == 'medium' else 40
 
     if correct:
-        progress = UserQuestionProgress(user_id=user_id, question_id=question_id, answered_correctly=True)
-        db.session.add(progress)
-        db.session.commit()
+        user = User.query.get(user_id)
+        if user:
+            user.xp += xp
+            db.session.commit()
+
+        progress = UserQuestionProgress.query.filter_by(user_id=user_id, question_id=question_id).first()
+        if not progress:
+            progress = UserQuestionProgress(user_id=user_id, question_id=question_id, answered_correctly=True)
+            db.session.add(progress)
+            db.session.commit()
 
     return {"message": "Răspuns trimis.", "correct": correct, "xp": xp, "status": "success"}, 200
+
 
 
 @app.route('/api/admin/exercises', methods=['GET'])
@@ -505,5 +526,6 @@ if __name__ == '__main__':
     except Exception as e:
         print("Eroare la conectarea cu baza de date:", e)
    
+
 
 
